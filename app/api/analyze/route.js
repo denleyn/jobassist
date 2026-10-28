@@ -36,24 +36,29 @@ const analysisSchema = z.object({
 })
 
 async function extractResumeText(file) {
-  const arrayBuffer = await file.arrayBuffer()
-  const buffer = new Uint8Array(arrayBuffer)
-  const type = file.type || ""
+  const fileType = file.type || ""
 
-  if (type === PDF_MIME) {
+  if (fileType === PDF_MIME) {
+    const arrayBuffer = await file.arrayBuffer()
+    const buffer = new Uint8Array(arrayBuffer)
     const pdf = await getDocumentProxy(buffer)
     const { text } = await extractText(pdf, { mergePages: true })
     return text
   }
 
-  if (type === DOCX_MIME) {
+  if (fileType === DOCX_MIME) {
+    const arrayBuffer = await file.arrayBuffer()
     const nodeBuffer = Buffer.from(arrayBuffer)
     const result = await mammoth.extractRawText({ buffer: nodeBuffer })
     return result.value
   }
 
+  if (fileType === "text/plain") {
+    return await file.text()
+  }
+
   throw new Error(
-    "Unsupported file type. Please upload a PDF or DOCX file."
+    "Unsupported file type. Please upload a PDF, DOCX, or plain text file."
   )
 }
 
@@ -65,7 +70,7 @@ export async function POST(req) {
 
     if (!resumeFile || typeof resumeFile === "string") {
       return Response.json(
-        { error: "Resume file is required (PDF or DOCX)." },
+        { error: "Resume file is required (PDF, DOCX, or plain text)." },
         { status: 400 }
       )
     }
@@ -86,33 +91,24 @@ export async function POST(req) {
       )
     }
 
-    const prompt = `You are an expert career coach and resume analyst. Analyze the following resume against the job description and provide detailed feedback.
+    const prompt = `You are an expert ATS resume analyst. Analyze this resume against the job description.
 
-## Resume:
-${resumeText}
+Resume: ${resumeText}
+Job Description: ${jobDescription}
 
-## Job Description:
-${jobDescription}
+Return ONLY a JSON object. Rules for suggestions:
+- Never suggest removing experience that is directly relevant to the job posting
+- Focus suggestions on adding missing keywords naturally into existing bullet points
+- Cover letter must reference the specific company name and role from the job description
+- Match score should reflect keyword overlap AND transferable skills, not just exact matches
 
-## Instructions:
-1. Calculate a match score (0-100) based on how well the resume aligns with the job requirements
-2. Identify keywords from the job description that appear in the resume (matched keywords)
-3. Identify important keywords from the job description that are missing from the resume
-4. Provide 3-5 specific, actionable suggestions for improving the resume
-5. Write a professional cover letter (3-4 paragraphs) that:
-   - Opens with enthusiasm for the specific role
-   - Highlights relevant experience from the resume
-   - Addresses key requirements from the job description
-   - Ends with a confident call to action
-
-Be thorough but concise. Focus on the most impactful improvements.
-
-Respond with a single JSON object only (no markdown or other text) with exactly these keys: matchScore (number), matchedKeywords (array of strings), missingKeywords (array of strings), suggestions (array of strings), coverLetter (string).`
+JSON must have exactly these keys: matchScore (number), matchedKeywords (array of strings), missingKeywords (array of strings), suggestions (array of strings), coverLetter (string).`
 
     const completion = await groq.chat.completions.create({
-      model: "llama-3.1-8b-instant",
+      model: "openai/gpt-oss-120b",
       messages: [{ role: "user", content: prompt }],
       response_format: { type: "json_object" },
+      max_tokens: 4000,
     })
 
     const rawContent = completion.choices[0].message.content
@@ -120,8 +116,9 @@ Respond with a single JSON object only (no markdown or other text) with exactly 
     const result = analysisSchema.parse(parsed)
 
     return Response.json(result)
+
   } catch (error) {
-    console.error("Analysis error:", error)
+    console.error("Analysis error:", error.message)
     return Response.json(
       {
         error:
